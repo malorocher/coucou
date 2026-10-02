@@ -32,6 +32,7 @@ final class IslandWindowController: NSWindowController {
     // Window attach drag (M8)
     private var attachDragStart: NSPoint? = nil
     private var pendingIslandClick = false   // any island click → expand on mouseUp
+    private var pendingTopBandClick = false  // click on the empty top band of the open island → fold on mouseUp
     private var inAttachDrag = false
     private var dragGhostPanel: NSPanel? = nil
     private var dragGhostSize: CGFloat = 0
@@ -403,6 +404,8 @@ final class IslandWindowController: NSWindowController {
             MainActor.assumeIsolated {
                 guard self.wasInIsland else { return }
                 self.pendingIslandClick = true
+                self.pendingTopBandClick = self.state.mode == .expanded
+                    && self.isTopBandHit(event.locationInWindow)
                 self.hoverTimer?.cancel()
                 self.botHoverTimer?.cancel()
                 self.botHovering = false
@@ -451,13 +454,19 @@ final class IslandWindowController: NSWindowController {
             guard let self else { return event }
             MainActor.assumeIsolated {
                 let hadPendingClick = self.pendingIslandClick
+                let hadTopBandClick = self.pendingTopBandClick
                 let wasDragging     = self.inAttachDrag
                 self.pendingIslandClick = false
+                self.pendingTopBandClick = false
                 if wasDragging {
                     finishDrag()
                 } else {
                     self.attachDragStart = nil
-                    if hadPendingClick && self.state.mode != .expanded {
+                    if hadPendingClick && hadTopBandClick && self.state.mode == .expanded {
+                        // Click on the top of the open island folds it right away
+                        // instead of waiting for the home → petit timer.
+                        self.collapse()
+                    } else if hadPendingClick && self.state.mode != .expanded {
                         if self.fsm.state == .home {
                             // FSM already thinks it's open (e.g. the view folded it): just reopen.
                             self.expand(to: self.defaultView())
@@ -742,6 +751,19 @@ final class IslandWindowController: NSWindowController {
         }
         confusedRecoveryTimer = recovery
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.3, execute: recovery)
+    }
+
+    // MARK: - Top band hit test (click to fold)
+
+    /// True when the point is in the empty middle of the header strip of the open island:
+    /// below the header bottom (y = 42) and clear of the tab buttons (left) and icons (right).
+    private func isTopBandHit(_ windowPoint: CGPoint) -> Bool {
+        let p = windowToIsland(windowPoint)
+        let headerBottom: CGFloat = 42
+        let sideMargin: CGFloat = 130
+        return p.y >= 0 && p.y <= headerBottom
+            && p.x >= sideMargin && p.x <= IslandConst.expandedWidth - sideMargin
+            && !isBotHit(windowPoint)
     }
 
     // MARK: - Bot hit test (for slap trigger)
