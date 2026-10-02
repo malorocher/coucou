@@ -160,10 +160,7 @@ struct OverviewView: View {
             }
             #endif
         case "agent_claude_app":
-            if let url = NSWorkspace.shared.urlForApplication(
-                withBundleIdentifier: HookServer.claudeAppBundleId) {
-                NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
-            }
+            HookServer.openClaudeApp(for: task)
         case "agent_gemini", "agent_antigravity":
             #if !APPSTORE
             let terminalBundleIds = ["com.apple.Terminal", "com.googlecode.iterm2",
@@ -331,6 +328,12 @@ struct FinishedView: View {
                 Text(state.focusTask?.steps.last ?? "Session finished")
                     .font(.system(size: 15, weight: .semibold))
                 HStack(spacing: 8) {
+                    if state.focusTask?.id == "agent_claude_app" {
+                        PrimaryButton("Open Claude") {
+                            HookServer.openClaudeApp(for: state.focusTask)
+                            NotificationCenter.default.post(name: .islandCollapse, object: nil)
+                        }
+                    } else {
                     #if !APPSTORE
                     PrimaryButton("Open terminal") {
                         let terminalBundleIds = ["com.apple.Terminal", "com.googlecode.iterm2", "net.kovidgoyal.kitty", "com.mitchellh.ghostty"]
@@ -343,6 +346,7 @@ struct FinishedView: View {
                         NotificationCenter.default.post(name: .islandCollapse, object: nil)
                     }
                     #endif
+                    }
                     SecondaryButton("OK") {
                         NotificationCenter.default.post(name: .islandCollapse, object: nil)
                     }
@@ -1405,11 +1409,10 @@ struct IntegrationCardView: View {
                         }
                         #endif
                     } else if task.id == "agent_claude_app" {
-                        if let url = NSWorkspace.shared.urlForApplication(
-                            withBundleIdentifier: HookServer.claudeAppBundleId) {
+                        if NSWorkspace.shared.urlForApplication(
+                            withBundleIdentifier: HookServer.claudeAppBundleId) != nil {
                             Button("Open Claude") {
-                                NSWorkspace.shared.openApplication(at: url, configuration: .init(),
-                                                                   completionHandler: nil)
+                                HookServer.openClaudeApp(for: task)
                             }
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(hex: task.color).opacity(0.85))

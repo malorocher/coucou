@@ -302,18 +302,21 @@ final class HookServer: @unchecked Sendable {
             // Approval dismissed — fall through so the resolving event updates state normally.
         }
 
+        // Claude desktop app conversation that sent this event (empty elsewhere).
+        let hostSessionId = payload["claude_host_session_id"] as? String ?? ""
+
         switch name {
 
         case "SessionStart":
             activeSessionId = sessionId
-            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd) }
+            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd, hostSessionId: hostSessionId) }
             nbLog("SessionStart \(isExternalAgent ? agentId : projectName) (\(sessionId.prefix(8)))")
             if state.isPresent { expandIfNeeded(to: .overview) }
             SoundEngine.shared.play("work")
 
         case "UserPromptSubmit":
             activeSessionId = sessionId
-            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd) }
+            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd, hostSessionId: hostSessionId) }
             state.updateTask(id: agentId, state: .thinking)
             if let prompt = payload["prompt"] as? String, !prompt.isEmpty {
                 appendStep(id: agentId, step: String(prompt.prefix(60)))
@@ -322,7 +325,7 @@ final class HookServer: @unchecked Sendable {
 
         case "PreToolUse":
             activeSessionId = sessionId
-            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd) }
+            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd, hostSessionId: hostSessionId) }
             state.updateTask(id: agentId, state: .working)
             let tool = payload["tool_name"] as? String ?? "Tool"
             let input = payload["tool_input"] as? [String: Any] ?? [:]
@@ -349,6 +352,7 @@ final class HookServer: @unchecked Sendable {
             }
 
         case "Stop":
+            setHostSession(id: agentId, hostSessionId: hostSessionId)
             state.updateTask(id: agentId, state: .finished)
             if let message = payload["message"] as? String, !message.isEmpty {
                 appendStep(id: agentId, step: String(message.prefix(60)))
@@ -537,7 +541,8 @@ final class HookServer: @unchecked Sendable {
         pendingApprovalFD = fd
         activeSessionId = sessionId
 
-        upsertWorkspaceTask(id: pillId, projectName: projectName, cwd: cwd)
+        upsertWorkspaceTask(id: pillId, projectName: projectName, cwd: cwd,
+                            hostSessionId: payload["claude_host_session_id"] as? String ?? "")
         state.updateTask(id: pillId, state: .approval)
         state.pendingApproval = ApprovalInfo(sessionId: sessionId, tool: tool,
                                               command: command, inputKey: inputKey, pillId: pillId)
@@ -633,11 +638,13 @@ final class HookServer: @unchecked Sendable {
     /// If the task already exists (persistent), just updates name/cwd.
     /// If missing (transient), creates it and inserts after the main pill.
     @MainActor
-    private func upsertWorkspaceTask(id: String, projectName: String, cwd: String = "") {
+    private func upsertWorkspaceTask(id: String, projectName: String, cwd: String = "",
+                                     hostSessionId: String = "") {
         let state = AppState.shared
         if let idx = state.tasks.firstIndex(where: { $0.id == id }) {
             state.tasks[idx].name = projectName
             if !cwd.isEmpty { state.tasks[idx].sessionCwd = cwd }
+            setHostSession(id: id, hostSessionId: hostSessionId)
             return
         }
         // Transient: create and insert after the main pill
@@ -651,8 +658,36 @@ final class HookServer: @unchecked Sendable {
         } else {
             state.tasks.insert(task, at: 0)
         }
+        setHostSession(id: id, hostSessionId: hostSessionId)
         if state.focusId == nil { state.focusId = id }
         state.syncMode()
+    }
+
+    /// Remembers which Claude desktop app conversation last spoke on this pill.
+    /// Ignores empty or malformed IDs (only "local_<uuid>" opens a conversation).
+    @MainActor
+    private func setHostSession(id: String, hostSessionId: String) {
+        guard Self.isValidHostSessionId(hostSessionId) else { return }
+        let state = AppState.shared
+        guard let idx = state.tasks.firstIndex(where: { $0.id == id }) else { return }
+        state.tasks[idx].hostSessionId = hostSessionId
+    }
+
+    /// Same shape the Claude app accepts in claude://code/continue?session=.
+    static func isValidHostSessionId(_ raw: String) -> Bool {
+        raw.range(of: #"^local_[A-Za-z0-9-]{1,64}$"#, options: .regularExpression) != nil
+    }
+
+    /// Opens the Claude desktop app on the conversation that last spoke on `task`,
+    /// or just brings the app forward when that conversation is unknown.
+    @MainActor
+    static func openClaudeApp(for task: AgentTask?) {
+        if let sid = task?.hostSessionId, isValidHostSessionId(sid),
+           let url = URL(string: "claude://code/continue?session=\(sid)") {
+            NSWorkspace.shared.open(url)
+        } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: claudeAppBundleId) {
+            NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
+        }
     }
 
     // MARK: - Badge helpers
@@ -1517,6 +1552,7 @@ def main():
     payload.setdefault('iterm_session_id', env.get('ITERM_SESSION_ID', ''))
     payload.setdefault('term_session_id', env.get('TERM_SESSION_ID', ''))
     payload.setdefault('bundle_id', env.get('__CFBundleIdentifier', ''))
+    payload.setdefault('claude_host_session_id', env.get('CLAUDE_CODE_HOST_SESSION_ID', ''))
     if 'cwd' not in payload or not payload['cwd']:
         paths = payload.get('workspacePaths') or payload.get('workspace_roots', [])
         if isinstance(paths, list) and paths:
@@ -1686,6 +1722,7 @@ def main():
     payload.setdefault('iterm_session_id', env.get('ITERM_SESSION_ID', ''))
     payload.setdefault('term_session_id', env.get('TERM_SESSION_ID', ''))
     payload.setdefault('bundle_id', env.get('__CFBundleIdentifier', ''))
+    payload.setdefault('claude_host_session_id', env.get('CLAUDE_CODE_HOST_SESSION_ID', ''))
     if 'cwd' not in payload or not payload['cwd']:
         paths = payload.get('workspacePaths') or payload.get('workspace_roots', [])
         if isinstance(paths, list) and paths:
