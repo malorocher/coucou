@@ -159,6 +159,11 @@ struct OverviewView: View {
                 NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
             }
             #endif
+        case "agent_claude_app":
+            if let url = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: HookServer.claudeAppBundleId) {
+                NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
+            }
         case "agent_gemini", "agent_antigravity":
             #if !APPSTORE
             let terminalBundleIds = ["com.apple.Terminal", "com.googlecode.iterm2",
@@ -1151,7 +1156,7 @@ struct IntegrationCardView: View {
 
     private var isConfigured: Bool {
         switch task.id {
-        case "integration_claude":
+        case "integration_claude", "agent_claude_app":
             #if APPSTORE
             // Sandboxed: can't read ~/.claude directly — check install flag set by HookServer
             return UserDefaults.standard.bool(forKey: "coucouHooksInstalled")
@@ -1399,6 +1404,17 @@ struct IntegrationCardView: View {
                             .buttonStyle(.plain)
                         }
                         #endif
+                    } else if task.id == "agent_claude_app" {
+                        if let url = NSWorkspace.shared.urlForApplication(
+                            withBundleIdentifier: HookServer.claudeAppBundleId) {
+                            Button("Open Claude") {
+                                NSWorkspace.shared.openApplication(at: url, configuration: .init(),
+                                                                   completionHandler: nil)
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Color(hex: task.color).opacity(0.85))
+                            .buttonStyle(.plain)
+                        }
                     } else if task.id == "agent_codex" {
                         #if !APPSTORE
                         if let url = NSWorkspace.shared.urlForApplication(

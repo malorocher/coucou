@@ -36,6 +36,7 @@ struct PillDefinition {
         switch id {
         case "integration_claude": return "Claude Code"
         case "agent_cursor":       return "Cursor"
+        case "agent_claude_app":   return "Claude Code"
         case "agent_codex":        return "Codex"
         default:                   return "Agent"
         }
@@ -52,6 +53,8 @@ enum PillCatalog {
               category: .workspace, subtitle: "Integration",  source: .claudeCode),
         .init(id: "agent_cursor",        name: "Cursor",      color: "#C0C4CC",
               category: .workspace, subtitle: "Integration",  source: .agent),
+        .init(id: "agent_claude_app",    name: "Claude",      color: "#D97757",
+              category: .workspace, subtitle: "Integration",  source: .claudeCode),
         .init(id: "agent_antigravity",   name: "Antigravity", color: "#E879F9",
               category: .workspace, subtitle: "Integration",  source: .agent,  githubOnly: true),
         .init(id: "agent_codex",         name: "Codex",       color: "#2DD4BF",
