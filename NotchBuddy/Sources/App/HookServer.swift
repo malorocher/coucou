@@ -701,8 +701,9 @@ final class HookServer: @unchecked Sendable {
                              state: .idle, steps: [], source: source, isIntegration: true)
         if !cwd.isEmpty { task.sessionCwd = cwd }
         let isSecond = PillCatalog.isSecondSession(id)
-        // Round eyes tell the second mascot apart from its pill's first one.
-        if isSecond { task.miniEye = .dot }
+        // Flat dash eyes tell the second mascot apart from its pill's first one
+        // (the default eyes are already near-round at mini size).
+        if isSecond { task.miniEye = .flat }
         let anchorId = isSecond ? PillCatalog.baseId(id) : state.mainPillId
         if let anchorIdx = state.tasks.firstIndex(where: { $0.id == anchorId }) {
             state.tasks.insert(task, at: anchorIdx + 1)
