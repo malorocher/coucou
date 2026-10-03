@@ -388,7 +388,7 @@ final class HookServer: @unchecked Sendable {
                 appendStep(id: agentId, step: String(message.prefix(60)))
             }
             SoundEngine.shared.play("finish")
-            if focused {
+            if focused || takeFocusForAlert(agentId) {
                 expandIfNeeded(to: .finished)
             } else {
                 setPillBadge(id: agentId, badge: .finished)
@@ -405,7 +405,7 @@ final class HookServer: @unchecked Sendable {
         case "StopFailure":
             state.updateTask(id: agentId, state: .error)
             SoundEngine.shared.play("error")
-            if focused {
+            if focused || takeFocusForAlert(agentId) {
                 expandIfNeeded(to: .error)
             } else {
                 setPillBadge(id: agentId, badge: .error)
@@ -472,6 +472,24 @@ final class HookServer: @unchecked Sendable {
     }
 
     // MARK: - Helpers
+
+    /// A pill that is not in front finished or failed: bring it to the front so its card
+    /// can open. Refused (the pill keeps a badge) while an approval is pending or while
+    /// the user is busy in another view such as the chat or Settings.
+    @MainActor
+    private func takeFocusForAlert(_ id: String) -> Bool {
+        let state = AppState.shared
+        guard state.pendingApproval == nil,
+              state.tasks.contains(where: { $0.id == id }) else { return false }
+        if state.mode == .expanded {
+            switch state.view {
+            case .overview, .empty, .finished, .error: break
+            default: return false
+            }
+        }
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.72)) { state.setFocus(id) }
+        return true
+    }
 
     @MainActor
     private func expandIfNeeded(to view: IslandView) {

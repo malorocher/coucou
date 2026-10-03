@@ -7,6 +7,7 @@
 - Ghostty: Claude Code started in Ghostty shows up on a new Ghostty pill, with permission requests in the notch.
 - Two sessions at once: a second Claude Code session of the same pill gets its own small mascot with flat dash eyes. Only two show, even with more sessions.
 - Click the top of the open island to fold it right away.
+- A session that finishes or fails on a pill that is not in front now comes to the front and opens its card, instead of only showing a badge.
 
 ## 0.1.2 — October 2, 2026
 
