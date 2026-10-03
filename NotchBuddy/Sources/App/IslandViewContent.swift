@@ -121,7 +121,7 @@ struct OverviewView: View {
 
     private func openAgentTarget(_ task: AgentTask?) {
         guard let task else { return }
-        switch task.id {
+        switch task.baseId {
         case "integration_claude":
             let vscodeBundleId = "com.microsoft.VSCode"
             if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == vscodeBundleId }) {
@@ -161,6 +161,8 @@ struct OverviewView: View {
             #endif
         case "agent_claude_app":
             HookServer.openClaudeApp(for: task)
+        case "agent_ghostty":
+            HookServer.openGhostty()
         case "agent_gemini", "agent_antigravity":
             #if !APPSTORE
             let terminalBundleIds = ["com.apple.Terminal", "com.googlecode.iterm2",
@@ -328,9 +330,14 @@ struct FinishedView: View {
                 Text(state.focusTask?.steps.last ?? "Session finished")
                     .font(.system(size: 15, weight: .semibold))
                 HStack(spacing: 8) {
-                    if state.focusTask?.id == "agent_claude_app" {
+                    if state.focusTask?.baseId == "agent_claude_app" {
                         PrimaryButton("Open Claude") {
                             HookServer.openClaudeApp(for: state.focusTask)
+                            NotificationCenter.default.post(name: .islandCollapse, object: nil)
+                        }
+                    } else if state.focusTask?.baseId == "agent_ghostty" {
+                        PrimaryButton("Open Ghostty") {
+                            HookServer.openGhostty()
                             NotificationCenter.default.post(name: .islandCollapse, object: nil)
                         }
                     } else {
@@ -1159,8 +1166,8 @@ struct IntegrationCardView: View {
     @ObservedObject private var appState = AppState.shared
 
     private var isConfigured: Bool {
-        switch task.id {
-        case "integration_claude", "agent_claude_app":
+        switch task.baseId {
+        case "integration_claude", "agent_claude_app", "agent_ghostty":
             #if APPSTORE
             // Sandboxed: can't read ~/.claude directly — check install flag set by HookServer
             return UserDefaults.standard.bool(forKey: "coucouHooksInstalled")
@@ -1204,7 +1211,7 @@ struct IntegrationCardView: View {
     }
 
     private var openURL: URL? {
-        switch task.id {
+        switch task.baseId {
         case "integration_claude":  return nil  // uses terminal button below
         case "integration_resend":  return URL(string: "https://resend.com/emails")
         case "integration_n8n":
@@ -1390,12 +1397,12 @@ struct IntegrationCardView: View {
                 .padding(.top, 2)
 
                 HStack(spacing: 8) {
-                    if task.id == "integration_claude" {
+                    if task.baseId == "integration_claude" {
                         Button("Open Visual Studio Code") { openVSCode() }
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(hex: task.color).opacity(0.7))
                             .buttonStyle(.plain)
-                    } else if task.id == "agent_cursor" {
+                    } else if task.baseId == "agent_cursor" {
                         #if !APPSTORE
                         if let url = NSWorkspace.shared.urlForApplication(
                             withBundleIdentifier: "com.todesktop.230313mzl4w4u92") {
@@ -1408,11 +1415,21 @@ struct IntegrationCardView: View {
                             .buttonStyle(.plain)
                         }
                         #endif
-                    } else if task.id == "agent_claude_app" {
+                    } else if task.baseId == "agent_claude_app" {
                         if NSWorkspace.shared.urlForApplication(
                             withBundleIdentifier: HookServer.claudeAppBundleId) != nil {
                             Button("Open Claude") {
                                 HookServer.openClaudeApp(for: task)
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Color(hex: task.color).opacity(0.85))
+                            .buttonStyle(.plain)
+                        }
+                    } else if task.baseId == "agent_ghostty" {
+                        if NSWorkspace.shared.urlForApplication(
+                            withBundleIdentifier: HookServer.ghosttyBundleId) != nil {
+                            Button("Open Ghostty") {
+                                HookServer.openGhostty()
                             }
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(hex: task.color).opacity(0.85))
@@ -1485,7 +1502,7 @@ struct IntegrationCardView: View {
                     }
                     // Settings button: shown when not configured, except cursor/codex (coming soon)
                     if !isConfigured
-                       && task.id != "agent_cursor"
+                       && task.baseId != "agent_cursor"
                        && task.id != "agent_codex" {
                         Button("Settings…") {
                             NotificationCenter.default.post(name: .openFullSettings, object: nil)

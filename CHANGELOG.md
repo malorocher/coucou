@@ -3,6 +3,10 @@
 ## Unreleased
 
 - Claude desktop app: Claude Code sessions from the Code tab show up on a new Claude pill, and you can answer their permission requests from the notch.
+- Claude desktop app: the finished card shows Open Claude and lands on the conversation that just finished.
+- Ghostty: Claude Code started in Ghostty shows up on a new Ghostty pill, with permission requests in the notch.
+- Two sessions at once: a second Claude Code session of the same pill gets its own small mascot with round eyes. Only two show, even with more sessions.
+- Click the top of the open island to fold it right away.
 
 ## 0.1.2 — October 2, 2026
 

@@ -37,6 +37,7 @@ struct PillDefinition {
         case "integration_claude": return "Claude Code"
         case "agent_cursor":       return "Cursor"
         case "agent_claude_app":   return "Claude Code"
+        case "agent_ghostty":      return "Claude Code"
         case "agent_codex":        return "Codex"
         default:                   return "Agent"
         }
@@ -54,6 +55,8 @@ enum PillCatalog {
         .init(id: "agent_cursor",        name: "Cursor",      color: "#C0C4CC",
               category: .workspace, subtitle: "Integration",  source: .agent),
         .init(id: "agent_claude_app",    name: "Claude",      color: "#D97757",
+              category: .workspace, subtitle: "Integration",  source: .claudeCode),
+        .init(id: "agent_ghostty",       name: "Ghostty",     color: "#5B7CFA",
               category: .workspace, subtitle: "Integration",  source: .claudeCode),
         .init(id: "agent_antigravity",   name: "Antigravity", color: "#E879F9",
               category: .workspace, subtitle: "Integration",  source: .agent,  githubOnly: true),
@@ -99,7 +102,27 @@ enum PillCatalog {
     static let defaultMainPillId = "integration_claude"
 
     /// Looks up a definition by task ID (nil if not in catalog).
+    /// A second-session task ("<pill>_2") resolves to its workspace pill.
     static func definition(for id: String) -> PillDefinition? {
-        all.first { $0.id == id }
+        let base = baseId(id)
+        return all.first { $0.id == base }
+    }
+
+    // MARK: - Second session
+
+    /// Suffix of the transient task that shows a second concurrent session of a workspace pill.
+    static let secondSessionSuffix = "_2"
+
+    /// Task ID of the second-session mascot for a workspace pill.
+    static func secondSessionId(for pillId: String) -> String { pillId + secondSessionSuffix }
+
+    /// True when `id` is the second-session task of a declared workspace pill.
+    static func isSecondSession(_ id: String) -> Bool { baseId(id) != id }
+
+    /// Workspace pill ID behind a task ID: strips the second-session suffix, otherwise unchanged.
+    static func baseId(_ id: String) -> String {
+        guard id.hasSuffix(secondSessionSuffix) else { return id }
+        let base = String(id.dropLast(secondSessionSuffix.count))
+        return all.contains { $0.id == base && $0.category == .workspace } ? base : id
     }
 }

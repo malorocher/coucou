@@ -36,7 +36,8 @@ struct ApprovalInfo: Sendable {
     var command: String
     /// tool_input serialized to JSON with sortedKeys, "" if absent — used to match PostToolUse.
     var inputKey: String
-    /// Pill that owns this approval: "integration_claude", "agent_cursor", or "agent_codex".
+    /// Task that owns this approval: a workspace pill ("integration_claude", "agent_cursor",
+    /// "agent_codex"…) or its second-session task.
     var pillId: String
 }
 
@@ -60,6 +61,9 @@ struct AgentTask: Identifiable, Equatable {
     var pillBadge: PillBadge? = nil  // alert badge shown on pill when not focused
     var sessionCwd: String?  = nil  // last known working directory (Claude Code sessions)
     var hostSessionId: String? = nil  // Claude desktop app conversation ID ("local_…"), for Open Claude
+
+    /// Workspace pill this task belongs to (same as `id`, except for a second-session task).
+    var baseId: String { PillCatalog.baseId(id) }
 }
 
 enum AgentSource: Equatable {

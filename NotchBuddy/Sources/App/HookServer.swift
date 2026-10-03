@@ -36,6 +36,10 @@ final class HookServer: @unchecked Sendable {
     private static let maxConnections = 32              // concurrent connection ceiling
     /// Bundle ID of the Claude desktop app; its Code tab runs Claude Code sessions.
     static let claudeAppBundleId = "com.anthropic.claudefordesktop"
+    /// Bundle ID of the Ghostty terminal.
+    static let ghosttyBundleId = "com.mitchellh.ghostty"
+    /// A quiet session frees its mascot slot after this long without any hook event.
+    private static let sessionIdleTimeout: TimeInterval = 600
 
     private var serverFD: Int32 = -1
     private let connectionLock = NSLock()
@@ -44,6 +48,16 @@ final class HookServer: @unchecked Sendable {
     private var approvalFDSource: (any DispatchSourceRead)? = nil  // monitors pendingApprovalFD
     private var activeSessionId: String? = nil        // current Claude Code session
     private var focusBeforeApproval: String? = nil    // saved focus to restore after approval
+
+    /// The (at most two) Claude Code sessions shown for one workspace pill.
+    /// `primary` drives the pill itself, `second` its "<pill>_2" mascot; further sessions fold into the pill.
+    private struct SessionSlots {
+        var primary: String?
+        var second: String?
+        var lastSeen: [String: Date] = [:]
+    }
+    private var sessionSlots: [String: SessionSlots] = [:]          // keyed by workspace pill ID
+    private var secondSessionExpiry: [String: DispatchWorkItem] = [:]
 
     private init() {}
 
@@ -230,6 +244,8 @@ final class HookServer: @unchecked Sendable {
         // ToDesktop builds other apps too — do not match on "todesktop" alone.
         let isCursorEditor = bundleId.lowercased() == "com.todesktop.230313mzl4w4u92"
         let isClaudeApp = bundleId.lowercased() == Self.claudeAppBundleId
+        let isGhostty = termProgram.lowercased() == "ghostty"
+                     || bundleId.lowercased() == Self.ghosttyBundleId
         let isVSCodeEditor = !isCursorEditor && (
             termProgram.lowercased().contains("vscode") ||
             bundleId.lowercased().contains("vscode"))
@@ -240,32 +256,48 @@ final class HookServer: @unchecked Sendable {
         // • Cursor bundle ID → agent_cursor
         // • Claude desktop app bundle ID (Code tab) → agent_claude_app
         // • VS Code → integration_claude
+        // • Ghostty terminal → agent_ghostty
+        // A second concurrent Claude Code session of a pill goes to its "<pill>_2" mascot.
         #if !APPSTORE
         let isCodexEvent = rawAgent == "codex"
         #else
         let isCodexEvent = false
         #endif
-        let agentId: String
+        let pillId: String
         let isExternalAgent: Bool
         if isCodexEvent {
-            agentId = "agent_codex"
+            pillId = "agent_codex"
             isExternalAgent = false
         } else if let agent = validAgent {
-            agentId = "agent_\(agent)"
+            pillId = "agent_\(agent)"
             isExternalAgent = true
         } else if isCursorEditor {
-            agentId = "agent_cursor"
+            pillId = "agent_cursor"
             isExternalAgent = false
         } else if isClaudeApp {
-            agentId = "agent_claude_app"
+            pillId = "agent_claude_app"
             isExternalAgent = false
         } else if isVSCodeEditor {
-            agentId = "integration_claude"
+            pillId = "integration_claude"
+            isExternalAgent = false
+        } else if isGhostty {
+            pillId = "agent_ghostty"
             isExternalAgent = false
         } else {
             nbLog("Ignored \(name) from \(termProgram.isEmpty ? bundleId : termProgram) (\(projectName))")
             return
         }
+
+        // Claude desktop app conversation that sent this event (empty elsewhere).
+        let hostSessionId = payload["claude_host_session_id"] as? String ?? ""
+
+        // Claude Code pills show up to two sessions; a conversation of the Claude app keeps
+        // its "local_…" ID across /clear and resume, so prefer it over the CLI session ID.
+        let tracksSessions = !isExternalAgent && !isCodexEvent
+        let sessionKey = Self.isValidHostSessionId(hostSessionId) ? hostSessionId : sessionId
+        let agentId = tracksSessions
+            ? taskId(forPill: pillId, sessionKey: sessionKey, allocate: name != "SessionEnd")
+            : pillId
 
         let focused = state.focusId == agentId
 
@@ -273,10 +305,11 @@ final class HookServer: @unchecked Sendable {
         // then continue normal processing. Only skip normal processing when unresolved.
         if let pending = state.pendingApproval, agentId == pending.pillId {
             let handledNote: String
-            switch pending.pillId {
+            switch PillCatalog.baseId(pending.pillId) {
             case "agent_cursor":     handledNote = "Handled in Cursor."
             case "agent_codex":      handledNote = "Handled in Codex."
             case "agent_claude_app": handledNote = "Handled in the Claude app."
+            case "agent_ghostty":    handledNote = "Handled in Ghostty."
             default:                 handledNote = "Handled in VS Code."
             }
             var resolved = false
@@ -301,9 +334,6 @@ final class HookServer: @unchecked Sendable {
             if !resolved { return }
             // Approval dismissed — fall through so the resolving event updates state normally.
         }
-
-        // Claude desktop app conversation that sent this event (empty elsewhere).
-        let hostSessionId = payload["claude_host_session_id"] as? String ?? ""
 
         switch name {
 
@@ -389,7 +419,11 @@ final class HookServer: @unchecked Sendable {
 
         case "SessionEnd":
             activeSessionId = nil
-            state.removeTask(id: agentId)
+            if tracksSessions {
+                endSession(pillId: pillId, sessionKey: sessionKey)
+            } else {
+                state.removeTask(id: agentId)
+            }
 
         case "SubagentStart":
             appendStep(id: agentId, step: "+ subagent")
@@ -481,6 +515,8 @@ final class HookServer: @unchecked Sendable {
         let bundleId    = payload["bundle_id"]    as? String ?? ""
         let isCursorEditor = bundleId.lowercased() == "com.todesktop.230313mzl4w4u92"
         let isClaudeApp = bundleId.lowercased() == Self.claudeAppBundleId
+        let isGhostty = termProgram.lowercased() == "ghostty"
+                     || bundleId.lowercased() == Self.ghosttyBundleId
         let isVSCodeEditor = !isCursorEditor && (
             termProgram.lowercased().contains("vscode") ||
             bundleId.lowercased().contains("vscode"))
@@ -502,23 +538,32 @@ final class HookServer: @unchecked Sendable {
         }
 
         // Determine which workspace pill owns the request.
-        let pillId: String
+        let workspaceId: String
         if isCodexRequest {
-            pillId = "agent_codex"
+            workspaceId = "agent_codex"
         } else if isCursorEditor {
-            pillId = "agent_cursor"
+            workspaceId = "agent_cursor"
         } else if isClaudeApp {
-            pillId = "agent_claude_app"
+            workspaceId = "agent_claude_app"
+        } else if isVSCodeEditor {
+            workspaceId = "integration_claude"
         } else {
-            pillId = "integration_claude"
+            workspaceId = "agent_ghostty"
         }
-        guard isCodexRequest || isCursorEditor || isClaudeApp || isVSCodeEditor else {
+        guard isCodexRequest || isCursorEditor || isClaudeApp || isVSCodeEditor || isGhostty else {
             Task.detached { [weak self] in
                 self?.sendLine(fd: fd, text: #"{"permissionDecision":"ask"}"#)
                 close(fd)
             }
             return
         }
+
+        // Task that owns the request: the pill, or its second-session mascot.
+        let hostSessionId = payload["claude_host_session_id"] as? String ?? ""
+        let sessionKey = Self.isValidHostSessionId(hostSessionId) ? hostSessionId : sessionId
+        let pillId = isCodexRequest
+            ? workspaceId
+            : taskId(forPill: workspaceId, sessionKey: sessionKey)
 
         let tool = payload["tool_name"] as? String ?? "Tool"
         let toolInput = payload["tool_input"] as? [String: Any] ?? [:]
@@ -541,8 +586,7 @@ final class HookServer: @unchecked Sendable {
         pendingApprovalFD = fd
         activeSessionId = sessionId
 
-        upsertWorkspaceTask(id: pillId, projectName: projectName, cwd: cwd,
-                            hostSessionId: payload["claude_host_session_id"] as? String ?? "")
+        upsertWorkspaceTask(id: pillId, projectName: projectName, cwd: cwd, hostSessionId: hostSessionId)
         state.updateTask(id: pillId, state: .approval)
         state.pendingApproval = ApprovalInfo(sessionId: sessionId, tool: tool,
                                               command: command, inputKey: inputKey, pillId: pillId)
@@ -562,10 +606,11 @@ final class HookServer: @unchecked Sendable {
         source.setEventHandler { [weak self] in
             guard let self, self.pendingApprovalFD == fd else { return }
             let note: String
-            switch capturedPillId {
+            switch PillCatalog.baseId(capturedPillId) {
             case "agent_cursor":     note = "Handled in Cursor."
             case "agent_codex":      note = "Handled in Codex."
             case "agent_claude_app": note = "Handled in the Claude app."
+            case "agent_ghostty":    note = "Handled in Ghostty."
             default:                 note = "Handled in VS Code."
             }
             self.dismissApprovalCard(note: note)
@@ -580,9 +625,10 @@ final class HookServer: @unchecked Sendable {
         DispatchQueue.main.asyncAfter(deadline: .now() + 115) { [weak self] in
             guard let self, self.pendingApprovalFD == captured else { return }
             let note: String
-            switch capturedPillId {
+            switch PillCatalog.baseId(capturedPillId) {
             case "agent_cursor":     note = "Still waiting in Cursor."
             case "agent_claude_app": note = "Still waiting in the Claude app."
+            case "agent_ghostty":    note = "Still waiting in Ghostty."
             case "agent_codex":      note = "Still waiting in Codex."
             default:                 note = "Still waiting in VS Code."
             }
@@ -651,9 +697,16 @@ final class HookServer: @unchecked Sendable {
         let def = PillCatalog.definition(for: id)
         let color = def?.color ?? "#C0C4CC"
         let source = def?.source ?? .agent
-        let task = AgentTask(id: id, name: projectName, color: color,
+        var task = AgentTask(id: id, name: projectName, color: color,
                              state: .idle, steps: [], source: source, isIntegration: true)
-        if let mainIdx = state.tasks.firstIndex(where: { $0.id == state.mainPillId }) {
+        if !cwd.isEmpty { task.sessionCwd = cwd }
+        let isSecond = PillCatalog.isSecondSession(id)
+        // Round eyes tell the second mascot apart from its pill's first one.
+        if isSecond { task.miniEye = .dot }
+        let anchorId = isSecond ? PillCatalog.baseId(id) : state.mainPillId
+        if let anchorIdx = state.tasks.firstIndex(where: { $0.id == anchorId }) {
+            state.tasks.insert(task, at: anchorIdx + 1)
+        } else if let mainIdx = state.tasks.firstIndex(where: { $0.id == state.mainPillId }) {
             state.tasks.insert(task, at: mainIdx + 1)
         } else {
             state.tasks.insert(task, at: 0)
@@ -687,6 +740,170 @@ final class HookServer: @unchecked Sendable {
             NSWorkspace.shared.open(url)
         } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: claudeAppBundleId) {
             NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
+        }
+    }
+
+    /// Brings Ghostty forward (launches it when it is not running).
+    @MainActor
+    static func openGhostty() {
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == ghosttyBundleId }) {
+            app.activate()
+        } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: ghosttyBundleId) {
+            NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
+        }
+    }
+
+    // MARK: - Session slots (second mascot)
+
+    /// Task that shows a session of a workspace pill: the pill itself for its first session,
+    /// "<pill>_2" for a second concurrent one. Further sessions fold into the pill, so at most
+    /// two mascots show per pill. With `allocate` false an unknown session takes no slot.
+    @MainActor
+    private func taskId(forPill pillId: String, sessionKey: String, allocate: Bool = true) -> String {
+        guard sessionKey != "unknown" else { return pillId }
+        let secondId = PillCatalog.secondSessionId(for: pillId)
+        let now = Date()
+        var slots = sessionSlots[pillId] ?? SessionSlots()
+
+        if slots.primary == sessionKey {
+            if allocate { sessionSlots[pillId, default: slots].lastSeen[sessionKey] = now }
+            return pillId
+        }
+        // A new or second session speaks: free the first slot if its session went quiet.
+        if allocate, let primary = slots.primary,
+           isQuiet(sessionKey: primary, taskId: pillId, slots: slots, now: now) {
+            releasePrimary(pillId: pillId)
+            slots = sessionSlots[pillId] ?? SessionSlots()
+            if slots.primary == sessionKey {   // the second session was promoted to the pill
+                sessionSlots[pillId]?.lastSeen[sessionKey] = now
+                return pillId
+            }
+        }
+        if slots.second == sessionKey {
+            if allocate {
+                sessionSlots[pillId, default: slots].lastSeen[sessionKey] = now
+                scheduleSecondSessionExpiry(pillId: pillId)
+            }
+            return secondId
+        }
+        guard allocate else { return pillId }
+        if slots.primary == nil {
+            slots.primary = sessionKey
+            slots.lastSeen[sessionKey] = now
+            sessionSlots[pillId] = slots
+            return pillId
+        }
+        if slots.second == nil {
+            slots.second = sessionKey
+            slots.lastSeen[sessionKey] = now
+            sessionSlots[pillId] = slots
+            scheduleSecondSessionExpiry(pillId: pillId)
+            nbLog("Second session on \(pillId)")
+            return secondId
+        }
+        return pillId   // third and later sessions: only two mascots
+    }
+
+    /// True when a session sent nothing for `sessionIdleTimeout` and its task is not mid-turn.
+    @MainActor
+    private func isQuiet(sessionKey: String, taskId: String, slots: SessionSlots, now: Date) -> Bool {
+        if let seen = slots.lastSeen[sessionKey], now.timeIntervalSince(seen) < Self.sessionIdleTimeout {
+            return false
+        }
+        switch AppState.shared.tasks.first(where: { $0.id == taskId })?.state {
+        case .working, .thinking, .searching, .approval, .question: return false
+        default: return true
+        }
+    }
+
+    /// A session ended. The second mascot goes away; when the first session ends while a
+    /// second one runs, the second takes over the pill. Folded sessions change nothing.
+    @MainActor
+    private func endSession(pillId: String, sessionKey: String) {
+        let state = AppState.shared
+        guard let slots = sessionSlots[pillId], slots.primary != nil else {
+            state.removeTask(id: pillId)   // nothing tracked: reset the pill as before
+            return
+        }
+        if slots.second == sessionKey {
+            sessionSlots[pillId]?.second = nil
+            sessionSlots[pillId]?.lastSeen[sessionKey] = nil
+            secondSessionExpiry[pillId]?.cancel()
+            secondSessionExpiry[pillId] = nil
+            removeSecondTask(pillId: pillId)
+        } else if slots.primary == sessionKey {
+            releasePrimary(pillId: pillId)
+        }
+    }
+
+    /// Frees the first slot: the second session takes over the pill, else the pill resets.
+    @MainActor
+    private func releasePrimary(pillId: String) {
+        let state = AppState.shared
+        if let primary = sessionSlots[pillId]?.primary {
+            sessionSlots[pillId]?.lastSeen[primary] = nil
+        }
+        sessionSlots[pillId]?.primary = nil
+        guard let second = sessionSlots[pillId]?.second else {
+            state.removeTask(id: pillId)
+            return
+        }
+        // Promote: the pill now shows the second session, and its mascot goes away.
+        sessionSlots[pillId]?.primary = second
+        sessionSlots[pillId]?.second = nil
+        secondSessionExpiry[pillId]?.cancel()
+        secondSessionExpiry[pillId] = nil
+        let secondId = PillCatalog.secondSessionId(for: pillId)
+        if let from = state.tasks.first(where: { $0.id == secondId }) {
+            upsertWorkspaceTask(id: pillId, projectName: from.name, cwd: from.sessionCwd ?? "",
+                                hostSessionId: from.hostSessionId ?? "")
+            if let idx = state.tasks.firstIndex(where: { $0.id == pillId }) {
+                state.tasks[idx].state     = from.state
+                state.tasks[idx].steps     = from.steps
+                state.tasks[idx].stepIndex = from.stepIndex
+                state.tasks[idx].pillBadge = from.pillBadge
+            }
+        } else {
+            state.removeTask(id: pillId)
+        }
+        if state.pendingApproval?.pillId == secondId { state.pendingApproval?.pillId = pillId }
+        if focusBeforeApproval == secondId { focusBeforeApproval = pillId }
+        removeSecondTask(pillId: pillId)
+    }
+
+    /// Removes the "<pill>_2" mascot and hands its focus back to the pill.
+    @MainActor
+    private func removeSecondTask(pillId: String) {
+        let state = AppState.shared
+        let secondId = PillCatalog.secondSessionId(for: pillId)
+        guard state.tasks.contains(where: { $0.id == secondId }) else { return }
+        state.tasks.removeAll { $0.id == secondId }
+        if state.focusId == secondId {
+            state.focusId = state.tasks.contains(where: { $0.id == pillId }) ? pillId : state.mainPillId
+        }
+        state.syncMode()
+        state.syncView()
+    }
+
+    /// One-shot timer: drops the second mascot once its session has been quiet long enough.
+    @MainActor
+    private func scheduleSecondSessionExpiry(pillId: String) {
+        secondSessionExpiry[pillId]?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor in self?.expireSecondSession(pillId: pillId) }
+        }
+        secondSessionExpiry[pillId] = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.sessionIdleTimeout + 1, execute: item)
+    }
+
+    @MainActor
+    private func expireSecondSession(pillId: String) {
+        guard let slots = sessionSlots[pillId], let second = slots.second else { return }
+        let secondId = PillCatalog.secondSessionId(for: pillId)
+        if isQuiet(sessionKey: second, taskId: secondId, slots: slots, now: Date()) {
+            endSession(pillId: pillId, sessionKey: second)
+        } else {
+            scheduleSecondSessionExpiry(pillId: pillId)   // still mid-turn: check again later
         }
     }
 
