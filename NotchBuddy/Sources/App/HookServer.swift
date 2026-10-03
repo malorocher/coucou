@@ -745,13 +745,14 @@ final class HookServer: @unchecked Sendable {
     }
 
     /// Brings Ghostty forward (launches it when it is not running).
+    /// Goes through NSWorkspace: Coucou is never the active app, so
+    /// NSRunningApplication.activate() is refused by macOS.
     @MainActor
     static func openGhostty() {
-        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == ghosttyBundleId }) {
-            app.activate()
-        } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: ghosttyBundleId) {
-            NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
-        }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: ghosttyBundleId) else { return }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config, completionHandler: nil)
     }
 
     // MARK: - Session slots (second mascot)
