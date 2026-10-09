@@ -4217,7 +4217,7 @@ struct WardrobeView: View {
             return h.displayName
         }
         // Fall back to current selection
-        let sel = state.mochiOutfitSelection
+        let sel = state.outfitSelection(for: state.focusId)
         if sel == .auto {
             let seasonal = Outfit.seasonal(for: Date(), calendar: .current)
             let name = seasonal == .none ? "None" : seasonal.displayName
@@ -4250,7 +4250,7 @@ struct WardrobeView: View {
                     ForEach(withAuto, id: \.rawValue) { outfit in
                         OutfitPillView(
                             outfit: outfit,
-                            isSelected: state.mochiOutfitSelection == outfit,
+                            isSelected: state.outfitSelection(for: state.focusId) == outfit,
                             isHovered: hoveredOutfit == outfit,
                             onHover: { h in
                                 hoveredOutfit = h ? outfit : nil
@@ -4265,8 +4265,9 @@ struct WardrobeView: View {
                                 }
                             },
                             onTap: {
-                                guard state.mochiOutfitSelection != outfit else { return }
-                                state.mochiOutfitSelection = outfit
+                                // The wardrobe dresses the Mochi in front: each pill has its own outfit.
+                                guard state.outfitSelection(for: state.focusId) != outfit else { return }
+                                state.setOutfitSelection(outfit, for: state.focusId)
                                 SoundEngine.shared.play("pop")
                                 NotificationCenter.default.post(name: .triggerEmote, object: BotEmote.proud)
                             },

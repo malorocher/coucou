@@ -73,6 +73,24 @@ final class AppState: ObservableObject {
     @Published var mochiOutfitSelection: Outfit = .auto {
         didSet { Outfit.stored = mochiOutfitSelection }
     }
+    // An outfit of its own for each other pill's Mochi (pill id → outfit) — persisted.
+    // The main pill keeps `mochiOutfitSelection`; a pill with no entry wears nothing.
+    @Published var pillOutfits: [String: Outfit] = [:] {
+        didSet { UserDefaults.standard.set(pillOutfits.mapValues(\.rawValue), forKey: "mochiOutfitByPill") }
+    }
+
+    /// The outfit chosen for a task's Mochi (a second-session mascot dresses like its pill).
+    func outfitSelection(for taskId: String?) -> Outfit {
+        guard let taskId else { return mochiOutfitSelection }
+        let pill = PillCatalog.baseId(taskId)
+        return pill == mainPillId ? mochiOutfitSelection : (pillOutfits[pill] ?? .none)
+    }
+
+    func setOutfitSelection(_ outfit: Outfit, for taskId: String?) {
+        guard let taskId else { mochiOutfitSelection = outfit; return }
+        let pill = PillCatalog.baseId(taskId)
+        if pill == mainPillId { mochiOutfitSelection = outfit } else { pillOutfits[pill] = outfit }
+    }
     // A colour of the user's own for each pill's Mochi (pill id → "#RRGGBB") — persisted.
     // Empty means the catalog's colours. PillDefinition.color reads the stored value, so
     // what is built from the catalog follows on its own; the tasks already on the island
@@ -100,9 +118,13 @@ final class AppState: ObservableObject {
     var wardrobePreviewOutfit: Outfit? = nil
     // Per-day seasonal cache — avoids recomputing Easter and date math on every frame
     private var _seasonalCache: (dayOfYear: Int, year: Int, outfit: Outfit)?
-    var resolvedOutfit: Outfit {
+    var resolvedOutfit: Outfit { resolvedOutfit(for: nil) }
+
+    /// What a task's Mochi wears right now; nil = the main pill's Mochi.
+    func resolvedOutfit(for taskId: String?) -> Outfit {
         if let preview = wardrobePreviewOutfit { return preview }
-        guard mochiOutfitSelection == .auto else { return mochiOutfitSelection }
+        let selection = outfitSelection(for: taskId)
+        guard selection == .auto else { return selection }
         let cal = Calendar.current
         let now = Date()
         let day  = cal.ordinality(of: .day, in: .year, for: now) ?? 0
@@ -474,6 +496,9 @@ final class AppState: ObservableObject {
         if let v = ud.object(forKey: "soundEnabled") as? Bool   { soundEnabled = v }
         if let v = ud.object(forKey: "soundVolume")  as? Double { soundVolume  = v }
         mochiOutfitSelection = Outfit.stored
+        if let raw = ud.dictionary(forKey: "mochiOutfitByPill") as? [String: String] {
+            pillOutfits = raw.compactMapValues(Outfit.init(rawValue:))
+        }
         pillColors = PillColors.stored
         if let v = ud.string(forKey: "claudeModel"),
            !v.trimmingCharacters(in: .whitespaces).isEmpty { claudeModel = v }

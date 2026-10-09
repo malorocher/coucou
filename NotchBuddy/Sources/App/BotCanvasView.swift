@@ -66,11 +66,8 @@ struct BotCanvasView: View {
                     #endif
                 }()
                 engine.setDancing(dancing)
-                let isWardrobe = state.mode == .expanded && state.view == .wardrobe
-                // The main pill's second-session mascot counts as the main pill.
-                let isFocusMain = state.focusId.map(PillCatalog.baseId) == state.mainPillId || state.focusId == nil
-                let showOutfit = isFocusMain || state.mode != .expanded || isWardrobe
-                engine.setOutfit(showOutfit ? state.resolvedOutfit : .none,
+                // Each pill's Mochi wears its own outfit, island open or folded.
+                engine.setOutfit(state.resolvedOutfit(for: state.focusId),
                                  animated: state.view != .wardrobe)
 
                 engine.update(dt: dt)
@@ -149,10 +146,7 @@ struct BotCanvasView: View {
         }
         .onAppear {
             engine.setState(state.effectiveState, force: true)
-            let isWardrobe = state.mode == .expanded && state.view == .wardrobe
-            let isFocusMain = state.focusId.map(PillCatalog.baseId) == state.mainPillId || state.focusId == nil
-            let showOutfit = isFocusMain || state.mode != .expanded || isWardrobe
-            engine.setOutfit(showOutfit ? state.resolvedOutfit : .none, animated: false)
+            engine.setOutfit(state.resolvedOutfit(for: state.focusId), animated: false)
         }
     }
 
