@@ -53,6 +53,22 @@ final class HookServer: @unchecked Sendable {
     private var activeSessionId: String? = nil        // current Claude Code session
     private var focusBeforeApproval: String? = nil    // saved focus to restore after approval
 
+    /// coucou_agent the relay sets for Claude Code sessions run from the Claude desktop app.
+    static let claudeDesktopAgent = "claude-desktop"
+    static let claudeDesktopPillId = "agent_claude-desktop"
+    /// A quiet session frees its mascot slot after this long without any hook event.
+    private static let sessionIdleTimeout: TimeInterval = 600
+
+    /// The (at most two) Claude Code sessions shown for one pill.
+    /// `primary` drives the pill itself, `second` its "<pill>_2" mascot; further sessions fold into the pill.
+    private struct SessionSlots {
+        var primary: String?
+        var second: String?
+        var lastSeen: [String: Date] = [:]
+    }
+    private var sessionSlots: [String: SessionSlots] = [:]          // keyed by pill ID
+    private var secondSessionExpiry: [String: DispatchWorkItem] = [:]
+
     private init() {}
 
     // MARK: - Approval fd helpers
@@ -369,34 +385,51 @@ final class HookServer: @unchecked Sendable {
         // • Cursor bundle ID → agent_cursor
         // • VS Code → integration_claude
         // • a known terminal (Warp, Terminal, iTerm…) → integration_claude, host recorded on the task
+        // • the Claude desktop app (coucou_agent "claude-desktop") → agent_claude-desktop, kept
+        //   between turns like a workspace pill so its cards and Open Claude have a task to show
+        // A second concurrent Claude Code session of a pill goes to its "<pill>_2" mascot.
         #if !APPSTORE
         let isCodexEvent = rawAgent == "codex"
         #else
         let isCodexEvent = false
         #endif
-        let agentId: String
+        let pillId: String
         let isExternalAgent: Bool
         var hostApp: String? = nil
         if isCodexEvent {
-            agentId = "agent_codex"
+            pillId = "agent_codex"
+            isExternalAgent = false
+        } else if rawAgent == Self.claudeDesktopAgent {
+            pillId = Self.claudeDesktopPillId
             isExternalAgent = false
         } else if let agent = validAgent {
-            agentId = "agent_\(agent)"
+            pillId = "agent_\(agent)"
             isExternalAgent = true
         } else if isCursorEditor {
-            agentId = "agent_cursor"
+            pillId = "agent_cursor"
             isExternalAgent = false
         } else if isVSCodeEditor {
-            agentId = "integration_claude"
+            pillId = "integration_claude"
             isExternalAgent = false
         } else if let host = ClaudeHost.terminal(termProgram: termProgram, bundleId: bundleId) {
-            agentId = "integration_claude"
+            pillId = "integration_claude"
             isExternalAgent = false
             hostApp = host.bundleId
         } else {
             nbLog("Ignored \(name) from \(termProgram.isEmpty ? bundleId : termProgram) (\(projectName))")
             return
         }
+
+        // Claude desktop app conversation that sent this event (empty elsewhere).
+        let hostSessionId = payload["claude_host_session_id"] as? String ?? ""
+
+        // Claude Code pills show up to two sessions; a conversation of the Claude app keeps
+        // its "local_…" ID across /clear and resume, so prefer it over the CLI session ID.
+        let tracksSessions = PillCatalog.secondSessionPills.contains(pillId)
+        let sessionKey = Self.isValidHostSessionId(hostSessionId) ? hostSessionId : sessionId
+        let agentId = tracksSessions
+            ? taskId(forPill: pillId, sessionKey: sessionKey, allocate: name != "SessionEnd")
+            : pillId
 
         let focused = state.focusId == agentId
         // For sessions that carry no id, derive a unique key from pill + cwd so that
@@ -407,7 +440,7 @@ final class HookServer: @unchecked Sendable {
 
         #if PHONE_LINK
         // The iPhone's "last turn" (prompt, actions, diffs, answer).
-        if !isExternalAgent { TurnRecorder.shared.record(event: name, payload: payload, pillId: agentId) }
+        if !isExternalAgent { TurnRecorder.shared.record(event: name, payload: payload, pillId: pillId) }
         #endif
 
         // While a permission request is pending, dismiss when the resolving event arrives,
@@ -415,7 +448,8 @@ final class HookServer: @unchecked Sendable {
         if let pending = state.pendingApproval, agentId == pending.pillId,
            pending.sessionId != "demo_session" {
             let handledNote: String
-            switch pending.pillId {
+            switch PillCatalog.baseId(pending.pillId) {
+            case Self.claudeDesktopPillId: handledNote = "Handled in the Claude app."
             case "agent_cursor":  handledNote = "Handled in Cursor."
             case "agent_codex":   handledNote = "Handled in Codex."
             case "agent_copilot": handledNote = "Handled in Copilot CLI."
@@ -450,7 +484,7 @@ final class HookServer: @unchecked Sendable {
 
         case "SessionStart":
             activeSessionId = sessionId
-            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd, hostApp: hostApp, bundleId: bundleId) }
+            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd, hostApp: hostApp, bundleId: bundleId, hostSessionId: hostSessionId) }
             if let idx = state.tasks.firstIndex(where: { $0.id == agentId }) { state.tasks[idx].finalLine = nil }
             nbLog("SessionStart \(isExternalAgent ? agentId : projectName) (\(sessionId.prefix(8)))")
             NotificationCenter.default.post(name: .checkMondayRecap, object: nil)
@@ -464,13 +498,13 @@ final class HookServer: @unchecked Sendable {
 
         case "UserPromptSubmit":
             activeSessionId = sessionId
-            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd, hostApp: hostApp, bundleId: bundleId) }
+            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd, hostApp: hostApp, bundleId: bundleId, hostSessionId: hostSessionId) }
             if let idx = state.tasks.firstIndex(where: { $0.id == agentId }) { state.tasks[idx].finalLine = nil }
             state.updateTask(id: agentId, state: .thinking)
             if let prompt = payload["prompt"] as? String, !prompt.isEmpty {
                 appendStep(id: agentId, step: String(prompt.prefix(60)))
             }
-            RecapStore.shared.userPromptSubmit(sessionId: recapSessionId, pillId: agentId, project: projectName)
+            RecapStore.shared.userPromptSubmit(sessionId: recapSessionId, pillId: pillId, project: projectName)
             NotificationCenter.default.post(name: .checkMondayRecap, object: nil)
             if state.isPresent { expandIfNeeded(to: .overview) }
 
@@ -482,7 +516,7 @@ final class HookServer: @unchecked Sendable {
             // AskUserQuestion is handled via the dedicated --ask hook.
             // Skip state/step update here to avoid flickering over the question card.
             guard tool != "AskUserQuestion" else { break }
-            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd, hostApp: hostApp, bundleId: bundleId) }
+            if isExternalAgent { upsertExternalAgent(id: agentId, name: validAgent!) } else { upsertWorkspaceTask(id: agentId, projectName: projectName, cwd: cwd, hostApp: hostApp, bundleId: bundleId, hostSessionId: hostSessionId) }
             state.updateTask(id: agentId, state: .working)
             let input = payload["tool_input"] as? [String: Any] ?? [:]
             let step = localizedStep(tool: tool, input: input)
@@ -517,6 +551,7 @@ final class HookServer: @unchecked Sendable {
             }
 
         case "Stop":
+            setHostSession(id: agentId, hostSessionId: hostSessionId)
             state.updateTask(id: agentId, state: .finished)
             let rawFinal = (payload["last_assistant_message"] as? String)
                 ?? (payload["message"] as? String) ?? ""
@@ -529,7 +564,7 @@ final class HookServer: @unchecked Sendable {
             }
             RecapStore.shared.stop(sessionId: recapSessionId)
             SoundEngine.shared.play("finish")
-            if focused {
+            if focused || takeFocusForAlert(agentId) {
                 expandIfNeeded(to: .finished)
             } else {
                 setPillBadge(id: agentId, badge: .finished)
@@ -547,7 +582,7 @@ final class HookServer: @unchecked Sendable {
             RecapStore.shared.stop(sessionId: recapSessionId)
             state.updateTask(id: agentId, state: .error)
             SoundEngine.shared.play("error")
-            if focused {
+            if focused || takeFocusForAlert(agentId) {
                 expandIfNeeded(to: .error)
             } else {
                 setPillBadge(id: agentId, badge: .error)
@@ -562,9 +597,13 @@ final class HookServer: @unchecked Sendable {
 
         case "SessionEnd":
             activeSessionId = nil
-            if let idx = state.tasks.firstIndex(where: { $0.id == agentId }) { state.tasks[idx].finalLine = nil }
-            state.clearSessionDiffs(for: agentId)
-            state.removeTask(id: agentId)
+            if tracksSessions {
+                endSession(pillId: pillId, sessionKey: sessionKey)
+            } else {
+                if let idx = state.tasks.firstIndex(where: { $0.id == agentId }) { state.tasks[idx].finalLine = nil }
+                state.clearSessionDiffs(for: agentId)
+                state.removeTask(id: agentId)
+            }
             RecapStore.shared.sessionEnd(sessionId: recapSessionId)
 
         case "SubagentStart":
@@ -619,6 +658,24 @@ final class HookServer: @unchecked Sendable {
     }
 
     // MARK: - Helpers
+
+    /// A pill that is not in front finished or failed: bring it to the front so its card
+    /// can open. Refused (the pill keeps a badge) while an approval or a question is pending
+    /// or while the user is busy in another view such as the chat or Settings.
+    @MainActor
+    private func takeFocusForAlert(_ id: String) -> Bool {
+        let state = AppState.shared
+        guard state.pendingApproval == nil, state.pendingQuestion == nil,
+              state.tasks.contains(where: { $0.id == id }) else { return false }
+        if state.mode == .expanded {
+            switch state.view {
+            case .overview, .empty, .finished, .error: break
+            default: return false
+            }
+        }
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.72)) { state.setFocus(id) }
+        return true
+    }
 
     @MainActor
     private func expandIfNeeded(to view: IslandView) {
@@ -693,7 +750,9 @@ final class HookServer: @unchecked Sendable {
         let isMuseRequest    = false
         let isHermesRequest  = false
         #endif
-        if !isCodexRequest && !isCopilotRequest && !isMuseRequest && !isHermesRequest && Self.validateAgent(rawAgent) != nil {
+        // Claude Code sessions of the Claude desktop app get the notch card too.
+        let isClaudeDesktopRequest = rawAgent == Self.claudeDesktopAgent
+        if !isCodexRequest && !isCopilotRequest && !isMuseRequest && !isHermesRequest && !isClaudeDesktopRequest && Self.validateAgent(rawAgent) != nil {
             Task.detached { [weak self] in
                 self?.sendLine(fd: fd, text: #"{"permissionDecision":"ask"}"#)
                 close(fd)
@@ -702,31 +761,40 @@ final class HookServer: @unchecked Sendable {
         }
 
         // Determine which workspace pill owns the request.
-        let pillId: String
+        let workspaceId: String
         if isCodexRequest {
-            pillId = "agent_codex"
+            workspaceId = "agent_codex"
         } else if isCopilotRequest {
-            pillId = "agent_copilot"
+            workspaceId = "agent_copilot"
         } else if isMuseRequest {
-            pillId = "agent_muse"
+            workspaceId = "agent_muse"
         } else if isHermesRequest {
-            pillId = "agent_hermes"
+            workspaceId = "agent_hermes"
+        } else if isClaudeDesktopRequest {
+            workspaceId = Self.claudeDesktopPillId
         } else if isCursorEditor {
-            pillId = "agent_cursor"
+            workspaceId = "agent_cursor"
         } else {
-            pillId = "integration_claude"
+            workspaceId = "integration_claude"
         }
         // Terminal sessions: only when turned on in Settings, else the terminal asks itself.
-        let terminalHost = isCursorEditor || isVSCodeEditor ? nil
+        let terminalHost = isCursorEditor || isVSCodeEditor || isClaudeDesktopRequest ? nil
             : ClaudeHost.terminal(termProgram: termProgram, bundleId: bundleId)
         let isTerminal = terminalHost != nil && ClaudeHost.terminalCardsEnabled
-        guard isCodexRequest || isCopilotRequest || isMuseRequest || isHermesRequest || isCursorEditor || isVSCodeEditor || isTerminal else {
+        guard isCodexRequest || isCopilotRequest || isMuseRequest || isHermesRequest || isClaudeDesktopRequest || isCursorEditor || isVSCodeEditor || isTerminal else {
             Task.detached { [weak self] in
                 self?.sendLine(fd: fd, text: #"{"permissionDecision":"ask"}"#)
                 close(fd)
             }
             return
         }
+
+        // Task that owns the request: the pill, or its second-session mascot.
+        let hostSessionId = payload["claude_host_session_id"] as? String ?? ""
+        let sessionKey = Self.isValidHostSessionId(hostSessionId) ? hostSessionId : sessionId
+        let pillId = PillCatalog.secondSessionPills.contains(workspaceId)
+            ? taskId(forPill: workspaceId, sessionKey: sessionKey)
+            : workspaceId
 
         let tool = payload["tool_name"] as? String ?? "Tool"
         let toolInput = payload["tool_input"] as? [String: Any] ?? [:]
@@ -761,7 +829,7 @@ final class HookServer: @unchecked Sendable {
         pendingApprovalFD = fd
         activeSessionId = sessionId
 
-        upsertWorkspaceTask(id: pillId, projectName: projectName, cwd: cwd, hostApp: terminalHost?.bundleId, bundleId: bundleId)
+        upsertWorkspaceTask(id: pillId, projectName: projectName, cwd: cwd, hostApp: terminalHost?.bundleId, bundleId: bundleId, hostSessionId: hostSessionId)
         state.updateTask(id: pillId, state: .approval)
         state.pendingApproval = ApprovalInfo(sessionId: sessionId, tool: tool,
                                               command: command, inputKey: inputKey, pillId: pillId)
@@ -781,7 +849,8 @@ final class HookServer: @unchecked Sendable {
         source.setEventHandler { [weak self] in
             guard let self, self.pendingApprovalFD == fd else { return }
             let note: String
-            switch capturedPillId {
+            switch PillCatalog.baseId(capturedPillId) {
+            case Self.claudeDesktopPillId: note = "Handled in the Claude app."
             case "agent_cursor":  note = "Handled in Cursor."
             case "agent_codex":   note = "Handled in Codex."
             case "agent_copilot": note = "Handled in Copilot CLI."
@@ -803,7 +872,8 @@ final class HookServer: @unchecked Sendable {
         DispatchQueue.main.asyncAfter(deadline: .now() + waitTimeout) { [weak self] in
             guard let self, self.pendingApprovalFD == captured else { return }
             let note: String
-            switch capturedPillId {
+            switch PillCatalog.baseId(capturedPillId) {
+            case Self.claudeDesktopPillId: note = "Still waiting in the Claude app."
             case "agent_cursor":  note = "Still waiting in Cursor."
             case "agent_codex":   note = "Still waiting in Codex."
             case "agent_copilot": note = "Still waiting in Copilot CLI."
@@ -858,7 +928,7 @@ final class HookServer: @unchecked Sendable {
         let pillId = state.pendingApproval?.pillId ?? "integration_claude"
         state.pendingApproval = nil
         state.isPinned = false
-        RecapStore.shared.recordDecision(pillId: pillId, decision: decision)
+        RecapStore.shared.recordDecision(pillId: PillCatalog.baseId(pillId), decision: decision)
         state.updateTask(id: pillId, state: .working)
         clearPillBadge(id: pillId)
         // Restore focus to the pill that was focused before the approval card appeared.
@@ -895,13 +965,13 @@ final class HookServer: @unchecked Sendable {
         #else
         let isCodexRequest = false
         #endif
-        let pillId: String
+        let workspaceId: String
         if isCodexRequest {
-            pillId = "agent_codex"
+            workspaceId = "agent_codex"
         } else if isCursorEditor {
-            pillId = "agent_cursor"
+            workspaceId = "agent_cursor"
         } else {
-            pillId = "integration_claude"
+            workspaceId = "integration_claude"
         }
         // Terminal sessions: only when turned on in Settings, else the terminal asks itself.
         let terminalHost = isCursorEditor || isVSCodeEditor ? nil
@@ -914,6 +984,10 @@ final class HookServer: @unchecked Sendable {
             }
             return
         }
+        // Task that owns the question: the pill, or its second-session mascot.
+        let pillId = PillCatalog.secondSessionPills.contains(workspaceId)
+            ? taskId(forPill: workspaceId, sessionKey: sessionId)
+            : workspaceId
 
         // Displace any previous question waiting for an answer.
         if pendingQuestionFD >= 0 {
@@ -977,13 +1051,15 @@ final class HookServer: @unchecked Sendable {
     /// If the task already exists (persistent), just updates name/cwd.
     /// If missing (transient), creates it and inserts after the main pill.
     @MainActor
-    private func upsertWorkspaceTask(id: String, projectName: String, cwd: String = "", hostApp: String? = nil, bundleId: String = "") {
+    private func upsertWorkspaceTask(id: String, projectName: String, cwd: String = "", hostApp: String? = nil, bundleId: String = "", hostSessionId: String = "") {
         let state = AppState.shared
+        let isClaudePill = PillCatalog.baseId(id) == "integration_claude"
         if let idx = state.tasks.firstIndex(where: { $0.id == id }) {
             state.tasks[idx].name = projectName
             if !cwd.isEmpty { state.tasks[idx].sessionCwd = cwd }
-            if id == "integration_claude" { state.tasks[idx].hostApp = hostApp }
+            if isClaudePill { state.tasks[idx].hostApp = hostApp }
             if !bundleId.isEmpty { state.tasks[idx].sessionBundleId = bundleId }
+            setHostSession(id: id, hostSessionId: hostSessionId)
             return
         }
         // Transient: create and insert after the main pill
@@ -992,15 +1068,224 @@ final class HookServer: @unchecked Sendable {
         let source = def?.source ?? .agent
         var task = AgentTask(id: id, name: projectName, color: color,
                              state: .idle, steps: [], source: source, isIntegration: true)
-        if id == "integration_claude" { task.hostApp = hostApp }
+        if isClaudePill { task.hostApp = hostApp }
         if !bundleId.isEmpty { task.sessionBundleId = bundleId }
-        if let mainIdx = state.tasks.firstIndex(where: { $0.id == state.mainPillId }) {
+        if !cwd.isEmpty { task.sessionCwd = cwd }
+        let isSecond = PillCatalog.isSecondSession(id)
+        // Flat dash eyes tell the second mascot apart from its pill's first one
+        // (the default eyes are already near-round at mini size).
+        if isSecond { task.miniEye = .flat }
+        let anchorId = isSecond ? PillCatalog.baseId(id) : state.mainPillId
+        if let anchorIdx = state.tasks.firstIndex(where: { $0.id == anchorId }) {
+            state.tasks.insert(task, at: anchorIdx + 1)
+        } else if let mainIdx = state.tasks.firstIndex(where: { $0.id == state.mainPillId }) {
             state.tasks.insert(task, at: mainIdx + 1)
         } else {
             state.tasks.insert(task, at: 0)
         }
+        setHostSession(id: id, hostSessionId: hostSessionId)
         if state.focusId == nil { state.focusId = id }
         state.syncMode()
+    }
+
+    /// Remembers which Claude desktop app conversation last spoke on this task.
+    /// Ignores empty or malformed IDs (only "local_<uuid>" opens a conversation).
+    @MainActor
+    private func setHostSession(id: String, hostSessionId: String) {
+        guard Self.isValidHostSessionId(hostSessionId) else { return }
+        let state = AppState.shared
+        guard let idx = state.tasks.firstIndex(where: { $0.id == id }) else { return }
+        state.tasks[idx].hostSessionId = hostSessionId
+    }
+
+    /// Same shape the Claude app accepts in claude://code/continue?session=.
+    static func isValidHostSessionId(_ raw: String) -> Bool {
+        raw.range(of: #"^local_[A-Za-z0-9-]{1,64}$"#, options: .regularExpression) != nil
+    }
+
+    /// Opens the Claude desktop app on the conversation that last spoke on `task`,
+    /// or just brings the app forward when that conversation is unknown.
+    @MainActor
+    static func openClaudeApp(for task: AgentTask?) {
+        if let sid = task?.hostSessionId, isValidHostSessionId(sid),
+           let url = URL(string: "claude://code/continue?session=\(sid)") {
+            NSWorkspace.shared.open(url)
+        } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.anthropic.claudefordesktop") {
+            NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
+        }
+    }
+
+    // MARK: - Session slots (second mascot)
+
+    /// Task that shows a session of a pill: the pill itself for its first session,
+    /// "<pill>_2" for a second concurrent one. Further sessions fold into the pill, so at most
+    /// two mascots show per pill. With `allocate` false an unknown session takes no slot.
+    @MainActor
+    private func taskId(forPill pillId: String, sessionKey: String, allocate: Bool = true) -> String {
+        guard sessionKey != "unknown", !sessionKey.isEmpty else { return pillId }
+        let secondId = PillCatalog.secondSessionId(for: pillId)
+        let now = Date()
+        var slots = sessionSlots[pillId] ?? SessionSlots()
+
+        if slots.primary == sessionKey {
+            if allocate { sessionSlots[pillId, default: slots].lastSeen[sessionKey] = now }
+            return pillId
+        }
+        // A new or second session speaks: free the first slot if its session went quiet.
+        if allocate, let primary = slots.primary,
+           isQuiet(sessionKey: primary, taskId: pillId, slots: slots, now: now) {
+            releasePrimary(pillId: pillId)
+            slots = sessionSlots[pillId] ?? SessionSlots()
+            if slots.primary == sessionKey {   // the second session was promoted to the pill
+                sessionSlots[pillId]?.lastSeen[sessionKey] = now
+                return pillId
+            }
+        }
+        if slots.second == sessionKey {
+            if allocate {
+                sessionSlots[pillId, default: slots].lastSeen[sessionKey] = now
+                scheduleSecondSessionExpiry(pillId: pillId)
+            }
+            return secondId
+        }
+        guard allocate else { return pillId }
+        if slots.primary == nil {
+            slots.primary = sessionKey
+            slots.lastSeen[sessionKey] = now
+            sessionSlots[pillId] = slots
+            return pillId
+        }
+        if slots.second == nil {
+            slots.second = sessionKey
+            slots.lastSeen[sessionKey] = now
+            sessionSlots[pillId] = slots
+            scheduleSecondSessionExpiry(pillId: pillId)
+            nbLog("Second session on \(pillId)")
+            return secondId
+        }
+        return pillId   // third and later sessions: only two mascots
+    }
+
+    /// True when a session sent nothing for `sessionIdleTimeout` and its task is not mid-turn.
+    @MainActor
+    private func isQuiet(sessionKey: String, taskId: String, slots: SessionSlots, now: Date) -> Bool {
+        if let seen = slots.lastSeen[sessionKey], now.timeIntervalSince(seen) < Self.sessionIdleTimeout {
+            return false
+        }
+        switch AppState.shared.tasks.first(where: { $0.id == taskId })?.state {
+        case .working, .thinking, .searching, .approval, .question: return false
+        default: return true
+        }
+    }
+
+    /// A session ended. The second mascot goes away; when the first session ends while a
+    /// second one runs, the second takes over the pill. Folded sessions change nothing.
+    @MainActor
+    private func endSession(pillId: String, sessionKey: String) {
+        let state = AppState.shared
+        guard let slots = sessionSlots[pillId], slots.primary != nil else {
+            resetPill(pillId)   // nothing tracked: reset the pill as before
+            return
+        }
+        if slots.second == sessionKey {
+            sessionSlots[pillId]?.second = nil
+            sessionSlots[pillId]?.lastSeen[sessionKey] = nil
+            secondSessionExpiry[pillId]?.cancel()
+            secondSessionExpiry[pillId] = nil
+            state.clearSessionDiffs(for: PillCatalog.secondSessionId(for: pillId))
+            removeSecondTask(pillId: pillId)
+        } else if slots.primary == sessionKey {
+            releasePrimary(pillId: pillId)
+        }
+    }
+
+    /// What SessionEnd does to a pill with a single session: drop its last line and diffs,
+    /// then reset it (main or declared pill) or remove it (transient one).
+    @MainActor
+    private func resetPill(_ pillId: String) {
+        let state = AppState.shared
+        if let idx = state.tasks.firstIndex(where: { $0.id == pillId }) { state.tasks[idx].finalLine = nil }
+        state.clearSessionDiffs(for: pillId)
+        state.removeTask(id: pillId)
+    }
+
+    /// Frees the first slot: the second session takes over the pill, else the pill resets.
+    @MainActor
+    private func releasePrimary(pillId: String) {
+        let state = AppState.shared
+        if let primary = sessionSlots[pillId]?.primary {
+            sessionSlots[pillId]?.lastSeen[primary] = nil
+        }
+        sessionSlots[pillId]?.primary = nil
+        let secondId = PillCatalog.secondSessionId(for: pillId)
+        guard let second = sessionSlots[pillId]?.second,
+              let from = state.tasks.first(where: { $0.id == secondId }) else {
+            // No second session (or it never showed): plain reset.
+            let leftover = sessionSlots[pillId]?.second
+            sessionSlots[pillId]?.primary = leftover
+            sessionSlots[pillId]?.second = nil
+            resetPill(pillId)
+            removeSecondTask(pillId: pillId)
+            return
+        }
+        // Promote: the pill now shows the second session, and its mascot goes away.
+        sessionSlots[pillId]?.primary = second
+        sessionSlots[pillId]?.second = nil
+        secondSessionExpiry[pillId]?.cancel()
+        secondSessionExpiry[pillId] = nil
+        upsertWorkspaceTask(id: pillId, projectName: from.name, cwd: from.sessionCwd ?? "",
+                            hostApp: from.hostApp, bundleId: from.sessionBundleId ?? "",
+                            hostSessionId: from.hostSessionId ?? "")
+        if let idx = state.tasks.firstIndex(where: { $0.id == pillId }) {
+            state.tasks[idx].state     = from.state
+            state.tasks[idx].steps     = from.steps
+            state.tasks[idx].stepIndex = from.stepIndex
+            state.tasks[idx].pillBadge = from.pillBadge
+            state.tasks[idx].finalLine = from.finalLine
+        }
+        state.sessionDiffs[pillId] = state.sessionDiffs[secondId]
+        state.clearSessionDiffs(for: secondId)
+        if state.pendingApproval?.pillId == secondId { state.pendingApproval?.pillId = pillId }
+        if focusBeforeApproval == secondId { focusBeforeApproval = pillId }
+        if questionPillId == secondId { questionPillId = pillId }
+        if focusBeforeQuestion == secondId { focusBeforeQuestion = pillId }
+        removeSecondTask(pillId: pillId)
+    }
+
+    /// Removes the "<pill>_2" mascot and hands its focus back to the pill.
+    @MainActor
+    private func removeSecondTask(pillId: String) {
+        let state = AppState.shared
+        let secondId = PillCatalog.secondSessionId(for: pillId)
+        guard state.tasks.contains(where: { $0.id == secondId }) else { return }
+        state.tasks.removeAll { $0.id == secondId }
+        if state.focusId == secondId {
+            state.focusId = state.tasks.contains(where: { $0.id == pillId }) ? pillId : state.mainPillId
+        }
+        state.syncMode()
+        state.syncView()
+    }
+
+    /// One-shot timer: drops the second mascot once its session has been quiet long enough.
+    @MainActor
+    private func scheduleSecondSessionExpiry(pillId: String) {
+        secondSessionExpiry[pillId]?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor in self?.expireSecondSession(pillId: pillId) }
+        }
+        secondSessionExpiry[pillId] = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.sessionIdleTimeout + 1, execute: item)
+    }
+
+    @MainActor
+    private func expireSecondSession(pillId: String) {
+        guard let slots = sessionSlots[pillId], let second = slots.second else { return }
+        let secondId = PillCatalog.secondSessionId(for: pillId)
+        if isQuiet(sessionKey: second, taskId: secondId, slots: slots, now: Date()) {
+            endSession(pillId: pillId, sessionKey: second)
+        } else {
+            scheduleSecondSessionExpiry(pillId: pillId)   // still mid-turn: check again later
+        }
     }
 
     // MARK: - Badge helpers
@@ -3271,6 +3556,8 @@ def main():
     # route them to the Claude Desktop pill instead of dropping them (no VS Code terminal).
     if not payload.get('coucou_agent') and os.environ.get('CLAUDE_CODE_ENTRYPOINT') == 'claude-desktop':
         payload['coucou_agent'] = 'claude-desktop'
+    # The Claude app's own ID for the conversation ("local_…"): lets Open Claude land on it.
+    payload.setdefault('claude_host_session_id', os.environ.get('CLAUDE_CODE_HOST_SESSION_ID', ''))
 
     # Enrich with terminal context
     env = os.environ
@@ -3578,6 +3865,8 @@ def main():
     # route them to the Claude Desktop pill instead of dropping them (no VS Code terminal).
     if not payload.get('coucou_agent') and os.environ.get('CLAUDE_CODE_ENTRYPOINT') == 'claude-desktop':
         payload['coucou_agent'] = 'claude-desktop'
+    # The Claude app's own ID for the conversation ("local_…"): lets Open Claude land on it.
+    payload.setdefault('claude_host_session_id', os.environ.get('CLAUDE_CODE_HOST_SESSION_ID', ''))
 
     env = os.environ
     payload.setdefault('term_program', env.get('TERM_PROGRAM', ''))

@@ -186,7 +186,7 @@ struct OverviewView: View {
 
     private func openAgentTarget(_ task: AgentTask?) {
         guard let task else { return }
-        switch task.id {
+        switch task.baseId {
         case "integration_claude":
             if ClaudeHost.activate(task.hostApp) { return }
             let vscodeBundleId = "com.microsoft.VSCode"
@@ -226,7 +226,7 @@ struct OverviewView: View {
             }
             #endif
         case "agent_claude-desktop":
-            openClaudeDesktopApp()
+            HookServer.openClaudeApp(for: task)
         case "agent_gemini", "agent_antigravity",
              "agent_copilot", "agent_muse", "agent_opencode", "agent_amp":
             #if !APPSTORE
@@ -581,15 +581,6 @@ struct ErrorView: View {
     }
 }
 
-/// Brings the Claude desktop app forward (or launches it) — target of the Claude Desktop pill.
-private let claudeDesktopBundleId = "com.anthropic.claudefordesktop"
-
-private func openClaudeDesktopApp() {
-    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: claudeDesktopBundleId) {
-        NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
-    }
-}
-
 // MARK: - Finished
 
 struct FinishedView: View {
@@ -609,10 +600,11 @@ struct FinishedView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 HStack(spacing: 8) {
-                    if state.focusTask?.id == "agent_claude-desktop" {
-                        // Sessions from the Claude desktop app live there, not in a terminal.
+                    if state.focusTask?.baseId == "agent_claude-desktop" {
+                        // Sessions from the Claude desktop app live there, not in a terminal:
+                        // land on the conversation that just finished.
                         PrimaryButton("Open Claude") {
-                            openClaudeDesktopApp()
+                            HookServer.openClaudeApp(for: state.focusTask)
                             NotificationCenter.default.post(name: .islandCollapse, object: nil)
                         }
                     } else {
@@ -620,7 +612,7 @@ struct FinishedView: View {
                         PrimaryButton("Open terminal") {
                             // The app the session runs in (its terminal, or VS Code), then any known terminal
                             let task = state.focusTask
-                            if !(task?.id == "integration_claude" && ClaudeHost.activate(task?.hostApp)),
+                            if !(task?.baseId == "integration_claude" && ClaudeHost.activate(task?.hostApp)),
                                !TerminalTarget.activate(sessionBundleId: task?.sessionBundleId) {
                                 NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
                             }
@@ -1707,7 +1699,7 @@ struct IntegrationCardView: View {
     @State private var githubDetailSection: GitHubDetailSection = .myPRs
 
     private var isConfigured: Bool {
-        switch task.id {
+        switch task.baseId {
         // Cursor sessions are Claude Code running in Cursor's integrated terminal,
         // so the Cursor pill is set up exactly when the Claude Code hooks are.
         case "integration_claude", "agent_cursor":
@@ -1785,7 +1777,7 @@ struct IntegrationCardView: View {
     }
 
     private var openURL: URL? {
-        switch task.id {
+        switch task.baseId {
         case "integration_claude":  return nil  // uses terminal button below
         case "integration_resend":  return URL(string: "https://resend.com/emails")
         case "integration_n8n":
@@ -1899,8 +1891,8 @@ struct IntegrationCardView: View {
         // Pills driven by hooks, never by a key: the idle card reports whether the
         // hooks are in place. integration_claude read "Connected · loading…" with
         // nothing left to load — a session replaces this card, it never resolves here.
-        let isHooks = task.id == "integration_claude" || task.id == "agent_gemini"
-                   || task.id == "agent_antigravity"  || task.id == "agent_cursor"
+        let isHooks = task.baseId == "integration_claude" || task.id == "agent_gemini"
+                   || task.id == "agent_antigravity"  || task.baseId == "agent_cursor"
                    || task.id == "agent_codex"        || task.id == "agent_copilot"
                    || task.id == "agent_muse"         || task.id == "agent_opencode"
                    || task.id == "agent_amp"          || task.id == "agent_hermes"
@@ -1908,7 +1900,7 @@ struct IntegrationCardView: View {
         if isConfigured {
             if isHooks { return String(localized: "Hooks installed") }
             // No key or poller behind this pill: it only reflects hook events.
-            if task.id == "agent_claude-desktop" { return String(localized: "Ready · no setup needed") }
+            if task.baseId == "agent_claude-desktop" { return String(localized: "Ready · no setup needed") }
             if isAI {
                 let provider = ChatProvider(pillID: task.id)!
                 if provider.isLocal {
@@ -2041,7 +2033,7 @@ struct IntegrationCardView: View {
                     Circle()
                         .fill(Color(hex: task.color))
                         .frame(width: 7, height: 7)
-                    Text(task.id == "integration_claude" ? ClaudeHost.pillName(hostApp: task.hostApp)
+                    Text(task.baseId == "integration_claude" ? ClaudeHost.pillName(hostApp: task.hostApp)
                                                          : PillCatalog.definition(for: task.id)?.name ?? task.name)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(Color(hex: "#F5F6F8"))
@@ -2064,17 +2056,17 @@ struct IntegrationCardView: View {
                 .padding(.top, 2)
 
                 HStack(spacing: 8) {
-                    if task.id == "integration_claude", task.hostApp != nil {
+                    if task.baseId == "integration_claude", task.hostApp != nil {
                         Button("Open \(ClaudeHost.name(for: task.hostApp))") { ClaudeHost.activate(task.hostApp) }
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(hex: task.color).opacity(0.7))
                             .buttonStyle(.plain)
-                    } else if task.id == "integration_claude" {
+                    } else if task.baseId == "integration_claude" {
                         Button("Open Visual Studio Code") { openVSCode() }
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(hex: task.color).opacity(0.7))
                             .buttonStyle(.plain)
-                    } else if task.id == "agent_cursor" {
+                    } else if task.baseId == "agent_cursor" {
                         #if !APPSTORE
                         if let url = NSWorkspace.shared.urlForApplication(
                             withBundleIdentifier: "com.todesktop.230313mzl4w4u92") {
@@ -2165,7 +2157,7 @@ struct IntegrationCardView: View {
                     }
                     // Settings button: shown when not configured, except cursor/codex and music
                     if !isConfigured
-                       && task.id != "agent_cursor"
+                       && task.baseId != "agent_cursor"
                        && task.id != "agent_codex"
                        && task.id != "integration_music" {
                         Button("Settings…") {

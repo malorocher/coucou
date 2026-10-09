@@ -139,7 +139,30 @@ enum PillCatalog {
     static let defaultMainPillId = "integration_claude"
 
     /// Looks up a definition by task ID (nil if not in catalog).
+    /// A second-session task ("<pill>_2") resolves to its pill.
     static func definition(for id: String) -> PillDefinition? {
-        all.first { $0.id == id }
+        let base = baseId(id)
+        return all.first { $0.id == base }
+    }
+
+    // MARK: - Second session
+
+    /// Claude Code pills that show a second concurrent session as its own small mascot.
+    static let secondSessionPills: Set<String> = ["integration_claude", "agent_cursor", "agent_claude-desktop"]
+
+    /// Suffix of the transient task that shows a second concurrent session of a pill.
+    static let secondSessionSuffix = "_2"
+
+    /// Task ID of the second-session mascot for a pill.
+    static func secondSessionId(for pillId: String) -> String { pillId + secondSessionSuffix }
+
+    /// True when `id` is the second-session task of a pill.
+    static func isSecondSession(_ id: String) -> Bool { baseId(id) != id }
+
+    /// Pill ID behind a task ID: strips the second-session suffix, otherwise unchanged.
+    static func baseId(_ id: String) -> String {
+        guard id.hasSuffix(secondSessionSuffix) else { return id }
+        let base = String(id.dropLast(secondSessionSuffix.count))
+        return secondSessionPills.contains(base) ? base : id
     }
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased (fork)
+
+- Click the top of the open island, under the notch, to fold it right away.
+- Two sessions at once: a second Claude Code session of the same pill (VS Code or a terminal, Cursor, Claude Desktop) gets its own small mascot with flat dash eyes. Only two show, even with more sessions; when the first one ends the second takes over the pill.
+- Claude Desktop: the pill stays between turns, permission requests show Allow / Deny in the notch, and Open Claude lands on the conversation that just finished.
+- A session that finishes or fails on a pill that is not in front now comes to the front and opens its card, instead of only showing a badge.
+- "Open terminal" brings the session's terminal forward reliably (it could do nothing when Coucou was not the active app).
+
 ## Windows and Linux 0.2.0 — October 8, 2026
 
 The Windows and Linux app catches up with the Mac, from 0.1.1 to 0.2.1 — everything except Apple Music and the iPhone, which depend on macOS and iCloud.
