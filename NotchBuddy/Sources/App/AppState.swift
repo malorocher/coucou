@@ -501,6 +501,10 @@ final class AppState: ObservableObject {
            let a = try? JSONDecoder().decode([String].self, from: d) { n8nWorkflowFilter = Set(a) }
         if let d = ud.data(forKey: "activeIntegrations"),
            let a = try? JSONDecoder().decode([String].self, from: d) { activeIntegrations = Set(a) }
+        // Earlier fork builds called the Claude desktop pill "agent_claude_app".
+        if ud.string(forKey: "mainPill") == "agent_claude_app" {
+            ud.set("agent_claude-desktop", forKey: "mainPill")
+        }
         if let v = ud.string(forKey: "mainPill"), !v.isEmpty,
            PillCatalog.available.contains(where: { $0.id == v && $0.category == .workspace && !$0.comingSoon }) {
             mainPillId = v

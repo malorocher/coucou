@@ -67,7 +67,8 @@ struct BotCanvasView: View {
                 }()
                 engine.setDancing(dancing)
                 let isWardrobe = state.mode == .expanded && state.view == .wardrobe
-                let isFocusMain = state.focusId == state.mainPillId || state.focusId == nil
+                // The main pill's second-session mascot counts as the main pill.
+                let isFocusMain = state.focusId.map(PillCatalog.baseId) == state.mainPillId || state.focusId == nil
                 let showOutfit = isFocusMain || state.mode != .expanded || isWardrobe
                 engine.setOutfit(showOutfit ? state.resolvedOutfit : .none,
                                  animated: state.view != .wardrobe)
@@ -149,7 +150,7 @@ struct BotCanvasView: View {
         .onAppear {
             engine.setState(state.effectiveState, force: true)
             let isWardrobe = state.mode == .expanded && state.view == .wardrobe
-            let isFocusMain = state.focusId == state.mainPillId || state.focusId == nil
+            let isFocusMain = state.focusId.map(PillCatalog.baseId) == state.mainPillId || state.focusId == nil
             let showOutfit = isFocusMain || state.mode != .expanded || isWardrobe
             engine.setOutfit(showOutfit ? state.resolvedOutfit : .none, animated: false)
         }
